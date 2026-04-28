@@ -1,0 +1,52 @@
+# ---- Dependencies ---------------------------------------------------------
+node_modules/
+.pnp/
+.pnp.js
+.npm/
+
+# ---- Build output ---------------------------------------------------------
+dist/
+build/
+out-tsc/
+.angular/
+*.tsbuildinfo
+
+# ---- Test and report output ----------------------------------------------
+coverage/
+reports/
+.nyc_output/
+junit.xml
+*.lcov
+
+# ---- Environment and secrets ---------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/public/**/*.key
+
+# ---- Runtime artefacts ----------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+storage/uploads/
+!storage/uploads/.gitkeep
+.tmp-test-uploads/
+.tmp-test-logs/
+
+# ---- Editors and OS -------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.sample.json
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---- Tooling caches -------------------------------------------------------
+.eslintcache
+.stylelintcache
+.sonar/
+.scannerwork/
