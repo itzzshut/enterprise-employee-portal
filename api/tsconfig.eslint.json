@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src/**/*.ts", "knexfile.ts"],
+  "exclude": ["node_modules", "dist"]
+}
