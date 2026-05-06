@@ -1,0 +1,1420 @@
+{
+  "info": {
+    "_postman_id": "9c2b7f14-5d31-4a8e-9f6b-2a7c4e1d8b03",
+    "name": "Enterprise Employee Portal API",
+    "description": "Contract tests for the Employee Portal REST API.\n\nThe folders run in order and chain through environment variables: the Auth folder stores an access token per role, the Leave folder submits a request and stores its id, and the Approvals requests act on that id. Running the whole collection therefore exercises a complete employee -> manager -> HR workflow.\n\nRun locally with:\n\n    newman run postman/EmployeePortal.postman_collection.json \\\n      -e postman/EmployeePortal.local.postman_environment.json\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Correlation id per request: the same value appears in the API's",
+          "// structured logs, which makes a failed Newman run traceable.",
+          "pm.request.headers.add({",
+          "  key: 'X-Request-Id',",
+          "  value: 'newman-' + pm.variables.replaceIn('{{$guid}}')",
+          "});"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Assertions that apply to every request in the collection.",
+          "pm.test('responds within the performance budget', function () {",
+          "  pm.expect(pm.response.responseTime).to.be.below(1500);",
+          "});",
+          "",
+          "pm.test('echoes the correlation id', function () {",
+          "  pm.expect(pm.response.headers.has('X-Request-Id')).to.be.true;",
+          "});",
+          "",
+          "pm.test('never leaks a server banner', function () {",
+          "  pm.expect(pm.response.headers.get('X-Powered-By')).to.be.undefined;",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000/api/v1", "type": "string" },
+    { "key": "employeeEmail", "value": "employee@portal.dev", "type": "string" },
+    { "key": "employeePassword", "value": "Employee@12345", "type": "string" },
+    { "key": "managerEmail", "value": "manager@portal.dev", "type": "string" },
+    { "key": "managerPassword", "value": "Manager@12345", "type": "string" },
+    { "key": "hrEmail", "value": "hr@portal.dev", "type": "string" },
+    { "key": "hrPassword", "value": "HrAdmin@12345", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "00 · Health",
+      "item": [
+        {
+          "name": "Readiness probe",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/health/ready", "host": ["{{baseUrl}}"], "path": ["health", "ready"] },
+            "description": "Confirms the API is up and can reach MySQL before anything else runs."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('reports ready', function () {",
+                  "  pm.expect(body.status).to.eql('ready');",
+                  "  pm.expect(body.checks.database).to.eql('up');",
+                  "});",
+                  "",
+                  "pm.test('carries a timestamp', function () {",
+                  "  pm.expect(body).to.have.property('timestamp');",
+                  "  pm.expect(new Date(body.timestamp).toString()).to.not.eql('Invalid Date');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 · Auth",
+      "item": [
+        {
+          "name": "Login — employee",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{employeeEmail}}\",\n  \"password\": \"{{employeePassword}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('returns a token pair', function () {",
+                  "  pm.expect(body.accessToken).to.be.a('string').and.to.have.length.above(20);",
+                  "  pm.expect(body.refreshToken).to.be.a('string').and.to.have.length.above(20);",
+                  "  pm.expect(body.accessToken.split('.')).to.have.lengthOf(3);",
+                  "});",
+                  "",
+                  "pm.test('session user has the expected shape', function () {",
+                  "  pm.expect(body.user).to.have.all.keys(",
+                  "    'userId', 'employeeId', 'email', 'role', 'firstName', 'lastName',",
+                  "    'fullName', 'jobTitle', 'avatarUrl', 'departmentId', 'departmentName',",
+                  "    'managerId', 'mustChangePassword'",
+                  "  );",
+                  "  pm.expect(body.user.role).to.eql('EMPLOYEE');",
+                  "  pm.expect(body.user.email).to.eql(pm.variables.get('employeeEmail'));",
+                  "});",
+                  "",
+                  "pm.test('never returns the password hash', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('$2a$');",
+                  "  pm.expect(pm.response.text()).to.not.include('password_hash');",
+                  "});",
+                  "",
+                  "// Chain: everything after this uses the employee session by default.",
+                  "pm.environment.set('accessToken', body.accessToken);",
+                  "pm.environment.set('refreshToken', body.refreshToken);",
+                  "pm.environment.set('employeeId', body.user.employeeId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — manager",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{managerEmail}}\",\n  \"password\": \"{{managerPassword}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('role is MANAGER', function () {",
+                  "  pm.expect(body.user.role).to.eql('MANAGER');",
+                  "});",
+                  "",
+                  "pm.environment.set('managerToken', body.accessToken);",
+                  "pm.environment.set('managerEmployeeId', body.user.employeeId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — People Operations",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{hrEmail}}\",\n  \"password\": \"{{hrPassword}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('role is HR_ADMIN', function () {",
+                  "  pm.expect(body.user.role).to.eql('HR_ADMIN');",
+                  "});",
+                  "",
+                  "pm.environment.set('hrToken', body.accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — wrong password is rejected",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{employeeEmail}}\",\n  \"password\": \"definitely-not-the-password\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('uses the standard error envelope', function () {",
+                  "  pm.expect(body.error).to.have.property('code', 'UNAUTHORIZED');",
+                  "  pm.expect(body).to.have.property('requestId');",
+                  "});",
+                  "",
+                  "pm.test('does not reveal whether the account exists', function () {",
+                  "  pm.expect(body.error.message).to.eql('Invalid email or password');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Current session (/auth/me)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/auth/me", "host": ["{{baseUrl}}"], "path": ["auth", "me"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('matches the account that signed in', function () {",
+                  "  pm.expect(body.user.email).to.eql(pm.variables.get('employeeEmail'));",
+                  "  pm.expect(body.user.employeeId).to.eql(Number(pm.environment.get('employeeId')));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Protected route without a token is 401",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/employees", "host": ["{{baseUrl}}"], "path": ["employees"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });",
+                  "pm.test('says the bearer token is missing', function () {",
+                  "  pm.expect(pm.response.json().error.message).to.include('Missing bearer token');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh rotates the token pair",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "const previous = pm.environment.get('refreshToken');",
+                  "",
+                  "pm.test('issues a different refresh token (rotation)', function () {",
+                  "  pm.expect(body.refreshToken).to.not.eql(previous);",
+                  "});",
+                  "",
+                  "pm.test('issues a usable access token', function () {",
+                  "  pm.expect(body.accessToken.split('.')).to.have.lengthOf(3);",
+                  "});",
+                  "",
+                  "pm.environment.set('accessToken', body.accessToken);",
+                  "pm.environment.set('consumedRefreshToken', previous);",
+                  "pm.environment.set('refreshToken', body.refreshToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replaying a consumed refresh token is rejected",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{consumedRefreshToken}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] },
+            "description": "Reuse detection: a token that has already been rotated must fail, and the server revokes the whole session family."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });",
+                  "pm.test('explains that the session is over', function () {",
+                  "  pm.expect(pm.response.json().error.message).to.include('no longer valid');",
+                  "});",
+                  "",
+                  "// The replay revoked every session for this user, so sign in again",
+                  "// before the remaining folders run.",
+                  "const login = {",
+                  "  url: pm.variables.replaceIn('{{baseUrl}}/auth/login'),",
+                  "  method: 'POST',",
+                  "  header: { 'Content-Type': 'application/json' },",
+                  "  body: {",
+                  "    mode: 'raw',",
+                  "    raw: JSON.stringify({",
+                  "      email: pm.variables.get('employeeEmail'),",
+                  "      password: pm.variables.get('employeePassword')",
+                  "    })",
+                  "  }",
+                  "};",
+                  "",
+                  "pm.sendRequest(login, function (err, res) {",
+                  "  if (err) { return; }",
+                  "  const body = res.json();",
+                  "  pm.environment.set('accessToken', body.accessToken);",
+                  "  pm.environment.set('refreshToken', body.refreshToken);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 · Employees",
+      "item": [
+        {
+          "name": "Directory — paginated",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees?page=1&pageSize=5&sortBy=last_name&sortDir=asc",
+              "host": ["{{baseUrl}}"],
+              "path": ["employees"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "5" },
+                { "key": "sortBy", "value": "last_name" },
+                { "key": "sortDir", "value": "asc" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('returns a page envelope', function () {",
+                  "  pm.expect(body.data).to.be.an('array');",
+                  "  pm.expect(body.meta).to.include.all.keys(",
+                  "    'page', 'pageSize', 'total', 'totalPages', 'hasPrevious', 'hasNext'",
+                  "  );",
+                  "});",
+                  "",
+                  "pm.test('honours the requested page size', function () {",
+                  "  pm.expect(body.meta.pageSize).to.eql(5);",
+                  "  pm.expect(body.data.length).to.be.at.most(5);",
+                  "});",
+                  "",
+                  "pm.test('the seeded organisation is present', function () {",
+                  "  pm.expect(body.meta.total).to.be.at.least(10);",
+                  "});",
+                  "",
+                  "pm.test('every row matches the employee schema', function () {",
+                  "  body.data.forEach(function (employee) {",
+                  "    pm.expect(employee).to.include.all.keys('id', 'employeeCode', 'fullName', 'jobTitle', 'status');",
+                  "    pm.expect(employee.employeeCode).to.match(/^EMP-\\d{4,6}$/);",
+                  "    pm.expect(employee.status).to.eql('ACTIVE');",
+                  "  });",
+                  "});",
+                  "",
+                  "pm.test('results are sorted by surname', function () {",
+                  "  const names = body.data.map(function (e) { return e.lastName; });",
+                  "  const sorted = names.slice().sort();",
+                  "  pm.expect(names).to.eql(sorted);",
+                  "});",
+                  "",
+                  "if (body.data.length) {",
+                  "  pm.environment.set('sampleEmployeeId', body.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Directory — search filter",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees?q=engineer",
+              "host": ["{{baseUrl}}"],
+              "path": ["employees"],
+              "query": [{ "key": "q", "value": "engineer" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('every result matches the term', function () {",
+                  "  body.data.forEach(function (employee) {",
+                  "    const haystack = [employee.fullName, employee.jobTitle, employee.workEmail]",
+                  "      .join(' ').toLowerCase();",
+                  "    pm.expect(haystack).to.include('engineer');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Directory — rejects an unlisted sort column",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees?sortBy=password_hash",
+              "host": ["{{baseUrl}}"],
+              "path": ["employees"],
+              "query": [{ "key": "sortBy", "value": "password_hash" }]
+            },
+            "description": "Sort columns are whitelisted server-side so a client string can never reach ORDER BY."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('names the offending field', function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.error.details[0].field).to.eql('sortBy');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/employees/me", "host": ["{{baseUrl}}"], "path": ["employees", "me"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const employee = pm.response.json().employee;",
+                  "pm.test('is the signed-in employee', function () {",
+                  "  pm.expect(employee.id).to.eql(Number(pm.environment.get('employeeId')));",
+                  "  pm.expect(employee.managerId).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "RBAC — an employee cannot create employees",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"employeeCode\": \"EMP-9001\",\n  \"firstName\": \"Should\",\n  \"lastName\": \"NotExist\",\n  \"workEmail\": \"should.not.exist@portal.dev\",\n  \"jobTitle\": \"Intruder\",\n  \"hireDate\": \"2026-01-01\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/employees", "host": ["{{baseUrl}}"], "path": ["employees"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', function () { pm.response.to.have.status(403); });",
+                  "pm.test('explains the role restriction', function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('FORBIDDEN');",
+                  "  pm.expect(body.error.message).to.include('EMPLOYEE');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "RBAC — an employee cannot list a team",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/me/team",
+              "host": ["{{baseUrl}}"],
+              "path": ["employees", "me", "team"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', function () { pm.response.to.have.status(403); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Manager can list their direct reports",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{managerToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/me/team",
+              "host": ["{{baseUrl}}"],
+              "path": ["employees", "me", "team"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "pm.test('returns the seeded engineering team', function () {",
+                  "  pm.expect(payload).to.be.an('array').that.is.not.empty;",
+                  "  payload.forEach(function (report) {",
+                  "    pm.expect(report.managerId).to.eql(Number(pm.environment.get('managerEmployeeId')));",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 · Leave",
+      "item": [
+        {
+          "name": "Leave types",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/leave/types", "host": ["{{baseUrl}}"], "path": ["leave", "types"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "pm.test('annual leave is configured', function () {",
+                  "  const annual = payload.find(function (type) { return type.code === 'ANNUAL'; });",
+                  "  pm.expect(annual, 'ANNUAL leave type').to.exist;",
+                  "  pm.expect(Number(annual.default_annual_days)).to.be.above(0);",
+                  "  pm.environment.set('annualLeaveTypeId', annual.id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My leave balances",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/leave/balances", "host": ["{{baseUrl}}"], "path": ["leave", "balances"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "const annual = payload.find(function (b) { return b.code === 'ANNUAL'; });",
+                  "",
+                  "pm.test('balance arithmetic holds', function () {",
+                  "  pm.expect(annual).to.exist;",
+                  "  const expected = annual.entitledDays + annual.carriedOverDays - annual.usedDays - annual.pendingDays;",
+                  "  pm.expect(annual.availableDays).to.be.closeTo(expected, 0.01);",
+                  "});",
+                  "",
+                  "pm.environment.set('annualAvailableBefore', annual.availableDays);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Submit a leave request",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pick the Monday five weeks out so the range is always in the",
+                  "// future and contains no weekend days.",
+                  "const start = new Date();",
+                  "start.setDate(start.getDate() + 35);",
+                  "start.setDate(start.getDate() - ((start.getDay() + 6) % 7));",
+                  "const end = new Date(start);",
+                  "end.setDate(end.getDate() + 2);",
+                  "",
+                  "const iso = function (d) { return d.toISOString().slice(0, 10); };",
+                  "pm.environment.set('leaveStartDate', iso(start));",
+                  "pm.environment.set('leaveEndDate', iso(end));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "",
+                  "const leaveRequest = pm.response.json().request;",
+                  "",
+                  "pm.test('starts in PENDING with a named approver', function () {",
+                  "  pm.expect(leaveRequest.status).to.eql('PENDING');",
+                  "  pm.expect(leaveRequest.currentApproverId).to.be.a('number');",
+                  "  pm.expect(leaveRequest.currentApproverName).to.be.a('string').and.not.empty;",
+                  "});",
+                  "",
+                  "pm.test('charges three working days', function () {",
+                  "  pm.expect(leaveRequest.totalDays).to.eql(3);",
+                  "});",
+                  "",
+                  "pm.test('echoes the submitted range', function () {",
+                  "  pm.expect(leaveRequest.startDate).to.eql(pm.environment.get('leaveStartDate'));",
+                  "  pm.expect(leaveRequest.endDate).to.eql(pm.environment.get('leaveEndDate'));",
+                  "});",
+                  "",
+                  "pm.environment.set('leaveRequestId', leaveRequest.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"leaveTypeId\": {{annualLeaveTypeId}},\n  \"startDate\": \"{{leaveStartDate}}\",\n  \"endDate\": \"{{leaveEndDate}}\",\n  \"reason\": \"Automated contract test — three day annual leave request.\",\n  \"halfDay\": false\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/leave/requests", "host": ["{{baseUrl}}"], "path": ["leave", "requests"] }
+          }
+        },
+        {
+          "name": "Balance reserves the pending days",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/leave/balances", "host": ["{{baseUrl}}"], "path": ["leave", "balances"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const annual = pm.response.json().data.find(function (b) { return b.code === 'ANNUAL'; });",
+                  "const before = Number(pm.environment.get('annualAvailableBefore'));",
+                  "",
+                  "pm.test('the three requested days are no longer available', function () {",
+                  "  pm.expect(annual.availableDays).to.be.closeTo(before - 3, 0.01);",
+                  "  pm.expect(annual.pendingDays).to.be.at.least(3);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Overlapping request is rejected with 409",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"leaveTypeId\": {{annualLeaveTypeId}},\n  \"startDate\": \"{{leaveStartDate}}\",\n  \"endDate\": \"{{leaveEndDate}}\",\n  \"reason\": \"Automated contract test — deliberate overlap with the request above.\",\n  \"halfDay\": false\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/leave/requests", "host": ["{{baseUrl}}"], "path": ["leave", "requests"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', function () { pm.response.to.have.status(409); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('names the conflicting request', function () {",
+                  "  pm.expect(body.error.code).to.eql('CONFLICT');",
+                  "  pm.expect(body.error.message).to.include('overlaps');",
+                  "  pm.expect(body.error.details[0].message).to.include('#' + pm.environment.get('leaveRequestId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inverted date range is rejected with 400",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"leaveTypeId\": {{annualLeaveTypeId}},\n  \"startDate\": \"{{leaveEndDate}}\",\n  \"endDate\": \"{{leaveStartDate}}\",\n  \"reason\": \"Automated contract test — end date before the start date.\",\n  \"halfDay\": false\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/leave/requests", "host": ["{{baseUrl}}"], "path": ["leave", "requests"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('points at the end date', function () {",
+                  "  const details = pm.response.json().error.details;",
+                  "  pm.expect(details.some(function (d) { return d.field === 'endDate'; })).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My requests include the new one",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests?status=PENDING",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests"],
+              "query": [{ "key": "status", "value": "PENDING" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "const id = Number(pm.environment.get('leaveRequestId'));",
+                  "",
+                  "pm.test('the submitted request is listed', function () {",
+                  "  pm.expect(payload.some(function (r) { return r.id === id; })).to.be.true;",
+                  "});",
+                  "",
+                  "pm.test('the status filter is applied', function () {",
+                  "  payload.forEach(function (r) { pm.expect(r.status).to.eql('PENDING'); });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Calendar range over six months is rejected",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/leave/calendar?from=2026-01-01&to=2026-12-31&scope=ME",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "calendar"],
+              "query": [
+                { "key": "from", "value": "2026-01-01" },
+                { "key": "to", "value": "2026-12-31" },
+                { "key": "scope", "value": "ME" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('explains the six-month cap', function () {",
+                  "  pm.expect(pm.response.text()).to.include('six months');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 · Approval workflow",
+      "item": [
+        {
+          "name": "Employee cannot approve their own request",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"decision\": \"APPROVED\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests/{{leaveRequestId}}/decision",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests", "{{leaveRequestId}}", "decision"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', function () { pm.response.to.have.status(403); });",
+                  "pm.test('blocked by the route-level role check', function () {",
+                  "  pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Manager sees the request in their queue",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{managerToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/leave/approvals", "host": ["{{baseUrl}}"], "path": ["leave", "approvals"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "const id = Number(pm.environment.get('leaveRequestId'));",
+                  "",
+                  "pm.test('the new request is waiting on this manager', function () {",
+                  "  const match = payload.find(function (r) { return r.id === id; });",
+                  "  pm.expect(match, 'request in the approval queue').to.exist;",
+                  "  pm.expect(match.status).to.eql('PENDING');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rejecting without a comment is refused",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{managerToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"decision\": \"REJECTED\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests/{{leaveRequestId}}/decision",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests", "{{leaveRequestId}}", "decision"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('requires a reason on rejection', function () {",
+                  "  pm.expect(pm.response.text()).to.include('comment is required');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Manager approves — PENDING to MANAGER_APPROVED",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{managerToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"APPROVED\",\n  \"comments\": \"Coverage confirmed with the team.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests/{{leaveRequestId}}/decision",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests", "{{leaveRequestId}}", "decision"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const leaveRequest = pm.response.json().request;",
+                  "pm.test('advanced to MANAGER_APPROVED', function () {",
+                  "  pm.expect(leaveRequest.status).to.eql('MANAGER_APPROVED');",
+                  "});",
+                  "",
+                  "pm.test('was routed on to People Operations', function () {",
+                  "  pm.expect(leaveRequest.currentApproverId).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Approving twice returns 409",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{managerToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"APPROVED\",\n  \"comments\": \"Duplicate decision, should be refused by the transition guard.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests/{{leaveRequestId}}/decision",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests", "{{leaveRequestId}}", "decision"]
+            },
+            "description": "A MANAGER token cannot perform the HR stage, so the state machine refuses the second decision."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403 or 409', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([403, 409]);",
+                  "});",
+                  "pm.test('the request was not advanced again', function () {",
+                  "  pm.expect(pm.response.json().error.code).to.be.oneOf(['FORBIDDEN', 'CONFLICT']);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "People Ops approves — MANAGER_APPROVED to APPROVED",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{hrToken}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"APPROVED\",\n  \"comments\": \"Balance verified, payroll notified.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests/{{leaveRequestId}}/decision",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests", "{{leaveRequestId}}", "decision"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const leaveRequest = pm.response.json().request;",
+                  "pm.test('reached the terminal APPROVED state', function () {",
+                  "  pm.expect(leaveRequest.status).to.eql('APPROVED');",
+                  "  pm.expect(leaveRequest.currentApproverId).to.be.null;",
+                  "  pm.expect(leaveRequest.decidedAt).to.not.be.null;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Approval trail records both stages",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{hrToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/leave/requests/{{leaveRequestId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["leave", "requests", "{{leaveRequestId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('both decisions are on the record', function () {",
+                  "  const stages = body.approvals.map(function (a) { return a.stage; });",
+                  "  pm.expect(stages).to.include('MANAGER');",
+                  "  pm.expect(stages).to.include('HR');",
+                  "  body.approvals.forEach(function (a) {",
+                  "    pm.expect(a.decision).to.eql('APPROVED');",
+                  "    pm.expect(a.approverName).to.be.a('string').and.not.empty;",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Approved days moved from pending to used",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/leave/balances", "host": ["{{baseUrl}}"], "path": ["leave", "balances"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const annual = pm.response.json().data.find(function (b) { return b.code === 'ANNUAL'; });",
+                  "const before = Number(pm.environment.get('annualAvailableBefore'));",
+                  "",
+                  "pm.test('available days are unchanged by the approval itself', function () {",
+                  "  pm.expect(annual.availableDays).to.be.closeTo(before - 3, 0.01);",
+                  "});",
+                  "",
+                  "pm.test('the reservation became consumed days', function () {",
+                  "  pm.expect(annual.usedDays).to.be.at.least(3);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 · Timesheets, org chart and dashboard",
+      "item": [
+        {
+          "name": "Active projects",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/timesheets/projects",
+              "host": ["{{baseUrl}}"],
+              "path": ["timesheets", "projects"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "pm.test('seeded projects are returned', function () {",
+                  "  pm.expect(payload).to.be.an('array').that.is.not.empty;",
+                  "  payload.forEach(function (project) {",
+                  "    pm.expect(project).to.include.all.keys('id', 'code', 'name', 'is_billable');",
+                  "  });",
+                  "});",
+                  "",
+                  "pm.environment.set('projectId', payload[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Weekly timesheet — rejects a non-Monday",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/timesheets/week?weekStart=2026-03-11",
+              "host": ["{{baseUrl}}"],
+              "path": ["timesheets", "week"],
+              "query": [{ "key": "weekStart", "value": "2026-03-11" }]
+            },
+            "description": "Weeks are addressed by their Monday; 2026-03-11 is a Wednesday."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('explains the Monday rule', function () {",
+                  "  pm.expect(pm.response.text()).to.include('Monday');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Org chart — recursive CTE",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/org-chart?maxDepth=8",
+              "host": ["{{baseUrl}}"],
+              "path": ["org-chart"],
+              "query": [{ "key": "maxDepth", "value": "8" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('returns a rooted tree', function () {",
+                  "  pm.expect(body.tree).to.be.an('object');",
+                  "  pm.expect(body.tree.children).to.be.an('array').that.is.not.empty;",
+                  "});",
+                  "",
+                  "pm.test('subtree totals are consistent', function () {",
+                  "  const count = function (node) {",
+                  "    return node.children.reduce(function (sum, child) { return sum + count(child); }, 1);",
+                  "  };",
+                  "  pm.expect(count(body.tree) - 1).to.eql(body.tree.totalReports);",
+                  "});",
+                  "",
+                  "pm.test('reports the depth it walked', function () {",
+                  "  pm.expect(body.stats.maxDepth).to.be.at.least(2);",
+                  "  pm.expect(body.stats.nodesReturned).to.be.at.least(10);",
+                  "});",
+                  "",
+                  "pm.test('one query is fast enough for a page load', function () {",
+                  "  pm.expect(pm.response.responseTime).to.be.below(800);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Dashboard summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dashboard/summary",
+              "host": ["{{baseUrl}}"],
+              "path": ["dashboard", "summary"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('returns the role-shaped payload', function () {",
+                  "  pm.expect(body.role).to.eql('EMPLOYEE');",
+                  "  pm.expect(body.kpis).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(body.leaveBalances).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('an employee sees no company-wide KPI tiles', function () {",
+                  "  const keys = body.kpis.map(function (k) { return k.key; });",
+                  "  pm.expect(keys).to.not.include('activeEmployees');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Announcements feed",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/announcements?pageSize=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["announcements"],
+              "query": [{ "key": "pageSize", "value": "10" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "",
+                  "const payload = pm.response.json().data;",
+                  "pm.test('pinned items come first', function () {",
+                  "  const pinnedIndexes = payload",
+                  "    .map(function (a, index) { return a.isPinned ? index : -1; })",
+                  "    .filter(function (index) { return index >= 0; });",
+                  "  pinnedIndexes.forEach(function (index) {",
+                  "    pm.expect(index).to.be.below(payload.filter(function (a) { return a.isPinned; }).length);",
+                  "  });",
+                  "});",
+                  "",
+                  "pm.test('an employee never sees a manager-only post', function () {",
+                  "  payload.forEach(function (a) { pm.expect(a.audience).to.not.eql('MANAGERS'); });",
+                  "});",
+                  "",
+                  "if (payload.length) { pm.environment.set('announcementId', payload[0].id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark an announcement read",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/announcements/{{announcementId}}/read",
+              "host": ["{{baseUrl}}"],
+              "path": ["announcements", "{{announcementId}}", "read"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('the receipt is recorded', function () {",
+                  "  const announcement = pm.response.json().announcement;",
+                  "  pm.expect(announcement.isRead).to.be.true;",
+                  "  pm.expect(announcement.readCount).to.be.at.least(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown route returns a structured 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/does-not-exist",
+              "host": ["{{baseUrl}}"],
+              "path": ["does-not-exist"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });",
+                  "pm.test('uses the same error envelope as everything else', function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error.code).to.eql('ROUTE_NOT_FOUND');",
+                  "  pm.expect(body).to.have.property('requestId');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
