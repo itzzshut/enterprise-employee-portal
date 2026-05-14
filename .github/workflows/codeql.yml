@@ -1,0 +1,56 @@
+name: CodeQL
+
+# Static application security testing. Runs on every push to main, on pull
+# requests, and weekly so newly published CodeQL queries are applied to code
+# that has not changed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '27 4 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript-typescript']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # security-and-quality adds maintainability queries on top of the
+          # default security set — worth the extra minute on a codebase this size.
+          queries: security-and-quality
+          config: |
+            paths:
+              - api/src
+              - web/src
+            paths-ignore:
+              - '**/*.test.ts'
+              - '**/*.spec.ts'
+              - api/src/db/seeds
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:${{ matrix.language }}'

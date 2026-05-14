@@ -1,0 +1,239 @@
+name: CI
+
+# Mirrors the Jenkins pipeline so a fork without a Jenkins controller still gets
+# the same verification. Jenkins remains the deployment path; this workflow
+# stops at building images.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  REGISTRY: ghcr.io
+
+jobs:
+  api:
+    name: API · lint, typecheck, test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests
+        run: npm run test:ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-results
+          path: |
+            api/reports/junit/*.xml
+            api/coverage/lcov.info
+          retention-days: 14
+
+  web:
+    name: Web · lint, test, build
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test:ci
+
+      # Production configuration enforces the bundle budgets in angular.json,
+      # so a dependency that bloats the initial chunk fails the build here.
+      - name: Production build
+        run: npm run build:prod
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-test-results
+          path: |
+            web/reports/junit/*.xml
+            web/coverage/lcov.info
+          retention-days: 14
+
+  newman:
+    name: API validation · Postman/Newman
+    runs-on: ubuntu-24.04
+    needs: [api]
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_password
+          MYSQL_DATABASE: employee_portal
+          MYSQL_USER: portal
+          MYSQL_PASSWORD: portal_password
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot_password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      NODE_ENV: development
+      PORT: 4000
+      API_PREFIX: /api/v1
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: employee_portal
+      DB_USER: portal
+      DB_PASSWORD: portal_password
+      JWT_ACCESS_SECRET: github_actions_access_secret_value_for_ci_only_32
+      JWT_REFRESH_SECRET: github_actions_refresh_secret_value_for_ci_only_32
+      BCRYPT_ROUNDS: '10'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install API dependencies
+        working-directory: api
+        run: npm ci --no-audit --no-fund
+
+      - name: Migrate and seed
+        working-directory: api
+        run: |
+          npm run migrate
+          npm run seed
+
+      - name: Start the API
+        working-directory: api
+        run: |
+          npm run build
+          node dist/server.js &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for readiness
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:4000/api/v1/health/ready > /dev/null; then
+              echo "ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API never became ready" && exit 1
+
+      - name: Run the Postman collection
+        run: |
+          npm install --global newman newman-reporter-htmlextra
+          mkdir -p reports/newman
+          newman run postman/EmployeePortal.postman_collection.json \
+            --environment postman/EmployeePortal.local.postman_environment.json \
+            --env-var "baseUrl=http://localhost:4000/api/v1" \
+            --reporters cli,junit,htmlextra \
+            --reporter-junit-export reports/newman/junit.xml \
+            --reporter-htmlextra-export reports/newman/report.html \
+            --timeout-request 10000 \
+            --bail failure
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: newman-report
+          path: reports/newman
+          retention-days: 14
+
+  docker:
+    name: Docker · buildx
+    runs-on: ubuntu-24.04
+    needs: [api, web, newman]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Registry paths must be lowercase; the org name is not.
+      - name: Normalise the image owner
+        run: echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          target: runtime
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/employee-portal-api:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/employee-portal-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and push the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          target: runtime
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/employee-portal-web:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/employee-portal-web:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
