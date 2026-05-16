@@ -1,0 +1,705 @@
+openapi: 3.0.3
+
+# ---------------------------------------------------------------------------
+# Enterprise Employee Portal — REST API
+#
+# Exported from the live document served at /api-docs.json (defined in
+# api/src/docs/openapi.ts). Kept in the repository so it can be diffed in a
+# pull request, imported into Postman, and used for client code generation
+# without running the API.
+# ---------------------------------------------------------------------------
+
+info:
+  title: Enterprise Employee Portal API
+  version: 1.4.0
+  description: >
+    HR self-service REST API: authentication with refresh-token rotation, an
+    employee directory, leave management with a two-stage approval workflow,
+    weekly timesheets, a document vault, announcements, and an org chart backed
+    by a MySQL 8 recursive CTE.
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development
+  - url: https://staging.employee-portal.internal/api/v1
+    description: Staging
+  - url: https://portal.example.com/api/v1
+    description: Production
+
+tags:
+  - name: Auth
+    description: Login, refresh-token rotation and session introspection
+  - name: Employees
+    description: Directory search, profiles and avatars
+  - name: Departments
+    description: Department reference data
+  - name: Leave
+    description: Balances, requests, approvals and calendar
+  - name: Timesheets
+    description: Weekly time entry and approval
+  - name: Documents
+    description: Document vault with per-record access control
+  - name: Announcements
+    description: Company announcements and read receipts
+  - name: Org Chart
+    description: Recursive reporting hierarchy
+  - name: Dashboard
+    description: Role-aware KPI summary
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Missing, malformed or expired access token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: Authenticated, but the role or row ownership check failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: The request conflicts with current state (overlap, illegal transition)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: FORBIDDEN
+            message:
+              type: string
+              example: Role EMPLOYEE cannot access this resource
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  message: { type: string }
+        requestId:
+          type: string
+          description: Correlation id, matching the X-Request-Id response header
+          example: 8f1c9a2e-6f4b-4a1e-9f0d-7c2b5d3a1e44
+
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer, example: 1 }
+        pageSize: { type: integer, example: 20 }
+        total: { type: integer, example: 12 }
+        totalPages: { type: integer, example: 1 }
+        hasPrevious: { type: boolean }
+        hasNext: { type: boolean }
+
+    SessionUser:
+      type: object
+      properties:
+        userId: { type: integer, example: 4 }
+        employeeId: { type: integer, nullable: true, example: 4 }
+        email: { type: string, example: employee@portal.dev }
+        role:
+          type: string
+          enum: [EMPLOYEE, MANAGER, HR_ADMIN, SUPER_ADMIN]
+        firstName: { type: string, nullable: true, example: Priya }
+        lastName: { type: string, nullable: true, example: Raman }
+        fullName: { type: string, example: Priya Raman }
+        jobTitle: { type: string, nullable: true, example: Senior Software Engineer }
+        avatarUrl: { type: string, nullable: true }
+        departmentId: { type: integer, nullable: true }
+        departmentName: { type: string, nullable: true, example: Engineering }
+        managerId: { type: integer, nullable: true }
+        mustChangePassword: { type: boolean }
+
+    AuthResult:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/SessionUser' }
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresIn: { type: string, example: 15m }
+
+    Employee:
+      type: object
+      properties:
+        id: { type: integer }
+        employeeCode: { type: string, example: EMP-1004 }
+        firstName: { type: string }
+        lastName: { type: string }
+        fullName: { type: string, example: Priya Raman }
+        workEmail: { type: string }
+        phone: { type: string, nullable: true }
+        jobTitle: { type: string }
+        departmentId: { type: integer, nullable: true }
+        departmentName: { type: string, nullable: true }
+        managerId: { type: integer, nullable: true }
+        managerName: { type: string, nullable: true }
+        hireDate: { type: string, format: date }
+        terminationDate: { type: string, format: date, nullable: true }
+        employmentType:
+          type: string
+          enum: [FULL_TIME, PART_TIME, CONTRACT, INTERN]
+        status:
+          type: string
+          enum: [ACTIVE, ON_LEAVE, TERMINATED]
+        location: { type: string, nullable: true }
+        avatarUrl: { type: string, nullable: true }
+
+    LeaveBalance:
+      type: object
+      properties:
+        leaveTypeId: { type: integer }
+        code: { type: string, example: ANNUAL }
+        name: { type: string, example: Annual Leave }
+        colorHex: { type: string, example: '#2563eb' }
+        year: { type: integer, example: 2026 }
+        entitledDays: { type: number, example: 20 }
+        carriedOverDays: { type: number, example: 3 }
+        usedDays: { type: number, example: 4 }
+        pendingDays: { type: number, example: 5 }
+        availableDays:
+          type: number
+          description: entitled + carried - used - pending
+          example: 14
+
+    LeaveRequest:
+      type: object
+      properties:
+        id: { type: integer }
+        employeeId: { type: integer }
+        employeeName: { type: string }
+        employeeCode: { type: string }
+        leaveTypeId: { type: integer }
+        leaveTypeName: { type: string }
+        leaveTypeCode: { type: string, example: ANNUAL }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        totalDays:
+          type: number
+          description: Chargeable working days; weekends are excluded and a half day counts 0.5
+          example: 5
+        halfDay: { type: boolean }
+        reason: { type: string }
+        status:
+          type: string
+          enum: [PENDING, MANAGER_APPROVED, APPROVED, REJECTED, CANCELLED]
+        currentApproverId: { type: integer, nullable: true }
+        currentApproverName: { type: string, nullable: true }
+        submittedAt: { type: string, format: date-time }
+        decidedAt: { type: string, format: date-time, nullable: true }
+
+    CreateLeaveRequest:
+      type: object
+      required: [leaveTypeId, startDate, endDate, reason]
+      properties:
+        leaveTypeId: { type: integer, example: 1 }
+        startDate: { type: string, format: date, example: '2026-10-12' }
+        endDate: { type: string, format: date, example: '2026-10-16' }
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 500
+          example: Family wedding in Chennai.
+        halfDay: { type: boolean, default: false }
+
+    Decision:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVED, REJECTED]
+        comments:
+          type: string
+          description: Required when the decision is REJECTED
+          example: Coverage confirmed with the team.
+
+    OrgNode:
+      type: object
+      properties:
+        id: { type: integer }
+        managerId: { type: integer, nullable: true }
+        employeeCode: { type: string }
+        fullName: { type: string }
+        jobTitle: { type: string }
+        departmentName: { type: string, nullable: true }
+        depth: { type: integer }
+        directReports: { type: integer }
+        totalReports: { type: integer }
+        children:
+          type: array
+          items: { $ref: '#/components/schemas/OrgNode' }
+
+paths:
+  /health/ready:
+    get:
+      tags: [Dashboard]
+      summary: Readiness probe, including a database round trip
+      security: []
+      responses:
+        '200': { description: Ready }
+        '503': { description: Degraded — the database is unreachable }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for an access and refresh token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, example: employee@portal.dev }
+                password: { type: string, example: Employee@12345 }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { description: Rate limited — 10 attempts per IP and email per window }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate a refresh token
+      description: >
+        Consumes the supplied refresh token and issues a new pair. Replaying an
+        already-consumed token is treated as theft: every session for that user
+        is revoked.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: Rotated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the supplied refresh token
+      responses:
+        '204': { description: Session revoked }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current session user
+      responses:
+        '200':
+          description: Session user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/SessionUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /employees:
+    get:
+      tags: [Employees]
+      summary: Search the employee directory
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Name, title, email or employee code }
+        - { name: departmentId, in: query, schema: { type: integer } }
+        - { name: status, in: query, schema: { type: string, enum: [ACTIVE, ON_LEAVE, TERMINATED] } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [last_name, first_name, job_title, hire_date, employee_code]
+          description: Whitelisted server-side; anything else is a 400
+      responses:
+        '200':
+          description: Paginated directory
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Employee' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Employees]
+      summary: Create an employee record
+      description: HR_ADMIN and SUPER_ADMIN only. Optionally provisions a login in the same transaction.
+      responses:
+        '201': { description: Created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /employees/me:
+    get:
+      tags: [Employees]
+      summary: The signed-in user's own profile
+      responses:
+        '200': { description: Profile }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Employees]
+      summary: Update your own contact details
+      responses:
+        '200': { description: Updated }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /employees/me/team:
+    get:
+      tags: [Employees]
+      summary: Direct reports of the signed-in manager
+      description: MANAGER, HR_ADMIN and SUPER_ADMIN only.
+      responses:
+        '200': { description: Direct reports }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /employees/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Employees]
+      summary: Fetch one employee
+      responses:
+        '200': { description: Employee }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Employees]
+      summary: Update an employee
+      description: >
+        A MANAGER may only edit their own direct reports, and only
+        contact-level fields. Manager, department, status and employment type
+        are HR-only.
+      responses:
+        '200': { description: Updated }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /departments:
+    get:
+      tags: [Departments]
+      summary: List departments with headcount
+      responses:
+        '200': { description: Departments }
+    post:
+      tags: [Departments]
+      summary: Create a department (HR_ADMIN, SUPER_ADMIN)
+      responses:
+        '201': { description: Created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /leave/types:
+    get:
+      tags: [Leave]
+      summary: Active leave types
+      responses:
+        '200': { description: Leave types }
+
+  /leave/balances:
+    get:
+      tags: [Leave]
+      summary: Leave balances by type for a year
+      parameters:
+        - { name: employeeId, in: query, schema: { type: integer } }
+        - { name: year, in: query, schema: { type: integer, example: 2026 } }
+      responses:
+        '200':
+          description: Balances
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/LeaveBalance' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /leave/requests:
+    get:
+      tags: [Leave]
+      summary: My leave requests
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+      responses:
+        '200': { description: Paginated requests }
+    post:
+      tags: [Leave]
+      summary: Submit a leave request
+      description: >
+        Validates the range, rejects overlaps against PENDING, MANAGER_APPROVED
+        and APPROVED requests, and reserves the days against the balance — all
+        in one transaction with the balance row locked FOR UPDATE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLeaveRequest' }
+      responses:
+        '201':
+          description: Submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request: { $ref: '#/components/schemas/LeaveRequest' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { description: Insufficient balance }
+
+  /leave/approvals:
+    get:
+      tags: [Leave]
+      summary: Approval inbox
+      description: >
+        A manager sees requests routed to them; People Operations sees
+        everything awaiting the HR stage.
+      responses:
+        '200': { description: Requests awaiting the caller }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /leave/requests/{id}:
+    get:
+      tags: [Leave]
+      summary: One request with its approval trail
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Request and approvals }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /leave/requests/{id}/decision:
+    post:
+      tags: [Leave]
+      summary: Approve or reject a request
+      description: >
+        The stage (MANAGER or HR) is derived from the current status and checked
+        against the transition guard, so an out-of-order decision returns 409
+        rather than corrupting state. Self-approval is refused.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Decision' }
+      responses:
+        '200': { description: Decision recorded }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /leave/requests/{id}/cancel:
+    post:
+      tags: [Leave]
+      summary: Withdraw a request
+      description: The requester may cancel while pending; only People Operations may cancel an approved absence.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Cancelled }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /leave/calendar:
+    get:
+      tags: [Leave]
+      summary: Absence calendar for a date range
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+        - { name: scope, in: query, schema: { type: string, enum: [ME, TEAM, COMPANY], default: TEAM } }
+      responses:
+        '200': { description: Calendar entries }
+        '400': { description: Range longer than six months }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /timesheets/projects:
+    get:
+      tags: [Timesheets]
+      summary: Active projects available for time entry
+      responses:
+        '200': { description: Projects }
+
+  /timesheets/week:
+    get:
+      tags: [Timesheets]
+      summary: Weekly grid for an employee
+      parameters:
+        - { name: weekStart, in: query, required: true, schema: { type: string, format: date }, description: Must be a Monday }
+        - { name: employeeId, in: query, schema: { type: integer } }
+      responses:
+        '200': { description: Weekly timesheet, synthesised as an empty draft if untouched }
+        '400': { $ref: '#/components/responses/ValidationError' }
+    put:
+      tags: [Timesheets]
+      summary: Save the whole week as a draft
+      responses:
+        '200': { description: Saved }
+        '409': { description: The week is submitted or approved and can no longer be edited }
+
+  /timesheets/{id}/decision:
+    post:
+      tags: [Timesheets]
+      summary: Approve or reject a submitted timesheet
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Decision recorded }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /documents:
+    get:
+      tags: [Documents]
+      summary: List accessible documents
+      description: Visibility is applied in the WHERE clause, so pagination totals never leak inaccessible records.
+      responses:
+        '200': { description: Documents }
+    post:
+      tags: [Documents]
+      summary: Upload a document
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                title: { type: string }
+                category: { type: string }
+                visibility: { type: string, enum: [PRIVATE, MANAGER, HR, COMPANY] }
+      responses:
+        '201': { description: Uploaded }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /documents/{id}/download:
+    get:
+      tags: [Documents]
+      summary: Stream a document
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: File stream }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /announcements:
+    get:
+      tags: [Announcements]
+      summary: Announcement feed with per-viewer read state
+      parameters:
+        - { name: unreadOnly, in: query, schema: { type: string, enum: ['true', 'false'] } }
+      responses:
+        '200': { description: Feed }
+    post:
+      tags: [Announcements]
+      summary: Publish an announcement (HR_ADMIN, SUPER_ADMIN)
+      responses:
+        '201': { description: Created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /announcements/{id}/read:
+    post:
+      tags: [Announcements]
+      summary: Record a read receipt (idempotent)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Receipt recorded }
+
+  /org-chart:
+    get:
+      tags: [Org Chart]
+      summary: Reporting hierarchy as a tree
+      description: Built with a MySQL 8 WITH RECURSIVE CTE — one query for the whole subtree.
+      parameters:
+        - { name: rootEmployeeId, in: query, schema: { type: integer } }
+        - { name: maxDepth, in: query, schema: { type: integer, default: 8, maximum: 10 } }
+      responses:
+        '200':
+          description: Org tree
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tree: { $ref: '#/components/schemas/OrgNode' }
+                  breadcrumb:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        fullName: { type: string }
+                        jobTitle: { type: string }
+                  stats:
+                    type: object
+                    properties:
+                      totalActive: { type: integer }
+                      managers: { type: integer }
+                      maxDepth: { type: integer }
+                      nodesReturned: { type: integer }
+                      depthLimit: { type: integer }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dashboard/summary:
+    get:
+      tags: [Dashboard]
+      summary: Role-aware KPI summary for the landing page
+      description: One composed payload instead of six requests, with the tile set decided server-side.
+      responses:
+        '200': { description: Dashboard payload }
+        '401': { $ref: '#/components/responses/Unauthorized' }
