@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+reports
+logs
+storage
+.env
+.env.*
+!.env.example
+*.log
+.git
+.DS_Store
+**/*.test.ts

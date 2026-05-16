@@ -1,0 +1,138 @@
+name: employee-portal
+
+# ---------------------------------------------------------------------------
+# Local / staging stack: MySQL 8, the Express API, the Angular SPA behind nginx
+# and Adminer for poking at the database.
+#
+# The API waits for MySQL's healthcheck before it starts — without that, the
+# fail-fast boot check in server.ts would kill the container on a cold start
+# because mysqld takes a few seconds to accept connections.
+# ---------------------------------------------------------------------------
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: portal-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-authentication-plugin=caching_sha2_password
+      # The org chart relies on recursive CTEs; the default depth of 1000 is
+      # far more than the 10-level guard in the query, but pinning it makes the
+      # behaviour explicit.
+      - --cte-max-recursion-depth=1000
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${DB_NAME:-employee_portal}
+      MYSQL_USER: ${DB_USER:-portal}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-portal_password}
+    ports:
+      - '${DB_PORT:-3306}:3306'
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Anything in this directory runs once, on first initialisation only.
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-u', 'root', '-p${MYSQL_ROOT_PASSWORD:-root_password}']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [portal]
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: runtime
+    image: ${REGISTRY:-local}/employee-portal-api:${IMAGE_TAG:-latest}
+    container_name: portal-api
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 4000
+      API_PREFIX: /api/v1
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-employee_portal}
+      DB_USER: ${DB_USER:-portal}
+      DB_PASSWORD: ${DB_PASSWORD:-portal_password}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET must be set}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET must be set}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-7}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      APP_VERSION: ${IMAGE_TAG:-dev}
+    ports:
+      - '${API_PORT:-4000}:4000'
+    volumes:
+      - api-uploads:/app/storage/uploads
+    networks: [portal]
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: runtime
+    image: ${REGISTRY:-local}/employee-portal-web:${IMAGE_TAG:-latest}
+    container_name: portal-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '${WEB_PORT:-3000}:80'
+    networks: [portal]
+
+  adminer:
+    image: adminer:4.8.1-standalone
+    container_name: portal-adminer
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+      ADMINER_DESIGN: pepa-linha
+    ports:
+      - '${ADMINER_PORT:-8080}:8080'
+    networks: [portal]
+
+  # One-shot helper: `docker compose run --rm migrate` applies migrations and
+  # seeds. Kept out of the `api` container so a rolling deploy of several API
+  # replicas cannot run migrations concurrently.
+  migrate:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: build
+    image: ${REGISTRY:-local}/employee-portal-api-migrate:${IMAGE_TAG:-latest}
+    profiles: ['tools']
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-employee_portal}
+      DB_USER: ${DB_USER:-portal}
+      DB_PASSWORD: ${DB_PASSWORD:-portal_password}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET must be set}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET must be set}
+    command: sh -c "npx knex --knexfile knexfile.ts migrate:latest && npx knex --knexfile knexfile.ts seed:run"
+    networks: [portal]
+
+volumes:
+  mysql-data:
+  api-uploads:
+
+networks:
+  portal:
+    driver: bridge
